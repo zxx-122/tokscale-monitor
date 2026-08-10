@@ -1,0 +1,4 @@
+node_modules/
+*.log
+smoke.out.log
+smoke.err.log
