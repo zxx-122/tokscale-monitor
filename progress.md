@@ -38,6 +38,7 @@
 - 今日累计 token（大数字）、输入/输出/缓存/推理明细
 - 今日最快模型（标签已从"今日最强模型"改为"今日最快模型"，避免误导）
 - 今日使用模型列表（前 6 + 计数）
+- **主卡 skill/MCP 简况**（新增）：`ToolsSummary` 一行显示"近7天 工具调用 N 次 · skill N 次(最常用) · MCP 未启用/已启用"，数据复用节流拉取的 `/tools` 缓存
 - 模型能力排行榜（前 5 + 源名/时间/缓存标记）
 - 最近 60 秒滚动、当前会话、今日成本
 - **双击卡片**：切换详情视图（`DetailBlock`，含完整模型明细 + 排行榜 + 近30天每日消耗 + 近7天 skill/MCP 调用）
@@ -102,9 +103,8 @@
 
 ## 三、接下来的具体任务（按优先级）
 
-1. （可选）widget 主卡直接展示 skill/MCP 简况（目前仅详情视图）
-2. （可选）`/history` 扩展：合并 sources.mjs 各工具扫描的每日数据（当前仅 opencode `message` 表）
-3. （可选）修复本机 GitHub 443 限制：注册 SSH key 或配置代理后改用 `git push`（当前用 Git Database API 推送可用）
+1. （可选）`/history` 扩展：合并 sources.mjs 各工具扫描的每日数据（当前仅 opencode `message` 表；sources 为内存增量扫描，跨进程无法回溯，需持久化存储才可行）
+2. （可选）修复本机 GitHub 443 限制：注册 SSH key 或配置代理后改用 `git push`（当前用 Git Database API 推送可用）
 
 ---
 
