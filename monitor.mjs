@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { scanAll, toolsStatus, TOOL_LABEL } from './sources.mjs';
-import { fetchLeaderboard, leaderboardSnapshot } from './leaderboard.mjs';
+import { fetchLeaderboard, leaderboardSnapshot, getActiveSource, setActiveSource } from './leaderboard.mjs';
 
 const PORT = Number(process.env.TOKSCALE_MONITOR_PORT) || 8899;
 const ROLLING_MS = 60_000;
@@ -311,8 +311,12 @@ const server = http.createServer(async (req, res) => {
   const pathname = req.url.split('?')[0];
   if (pathname === '/leaderboard') {
     try {
-      const force = new URLSearchParams((req.url.split('?')[1] || '')).get('refresh') === '1';
-      res.end(JSON.stringify(await fetchLeaderboard(force)));
+      const q = new URLSearchParams((req.url.split('?')[1] || ''));
+      const force = q.get('refresh') === '1';
+      const src = q.get('source');
+      // 指定 source 时切换当前活跃榜单（aa=智能指数 / code=编程能力）
+      if (src) setActiveSource(src);
+      res.end(JSON.stringify(await fetchLeaderboard(force, src || getActiveSource())));
     } catch (err) {
       res.statusCode = 502;
       res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));

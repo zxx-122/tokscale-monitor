@@ -38,6 +38,7 @@ function Get-LbShortName($lb) {
     try {
         if ($lb -and $lb.sourceName) {
             if ($lb.sourceName -match 'AA|Artificial Analysis|智能指数') { return 'AA 智能指数' }
+            if ($lb.sourceName -match '编程|SWE') { return '编程能力' }
             if ($lb.sourceName -match 'OpenCompass') { return 'OpenCompass' }
             return $lb.sourceName
         }
@@ -229,6 +230,29 @@ $miLbRefresh.Add_Click({
     } catch { Log "leaderboard refresh threw: $($_.Exception.Message)" }
 })
 
+# 排行榜源切换（aa=AA 智能指数 / code=编程能力）
+# 注意：变量名避免与控件 $LbSource 冲突（PowerShell 不区分大小写），故用 lbSrc
+$miLbSourceHeader = New-Object System.Windows.Controls.MenuItem
+$miLbSourceHeader.Header = '排行榜源'
+$script:lbSrc = 'aa'
+foreach ($ls in @(@('aa', 'AA 智能指数'), @('code', '编程能力'))) {
+    $mi = New-Object System.Windows.Controls.MenuItem
+    $mi.Header = $ls[1]
+    $mi.Tag = $ls[0]
+    $mi.IsChecked = ($ls[0] -eq $script:lbSrc)
+    $mi.Add_Click({
+        param($sender, $e)
+        $src = [string]$sender.Tag
+        $script:lbSrc = $src
+        try {
+            $null = $script:client.GetStringAsync("$lbEndpoint?source=$src").GetAwaiter().GetResult()
+            Log "leaderboard source switched to $src"
+            Refresh-Stats
+        } catch { Log "leaderboard switch threw: $($_.Exception.Message)" }
+    })
+    $miLbSourceHeader.Items.Add($mi) | Out-Null
+}
+
 $miRestart = New-Object System.Windows.Controls.MenuItem
 $miRestart.Header = '重启监测后端'
 $miRestart.Add_Click({
@@ -245,6 +269,7 @@ $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $menu.Items.Add($miReport) | Out-Null
 $menu.Items.Add($miCopy) | Out-Null
 $menu.Items.Add($miLbRefresh) | Out-Null
+$menu.Items.Add($miLbSourceHeader) | Out-Null
 $menu.Items.Add($miRestart) | Out-Null
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $menu.Items.Add($miExit) | Out-Null

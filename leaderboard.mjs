@@ -3,38 +3,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const LEADERBOARD_CACHE = process.env.TOKSCALE_LEADERBOARD_FILE || path.join(__dirname, 'leaderboard.json');
-const API_URL = 'https://www.datalearner.com/api/leaderboards/external/aa-quality-index';
 const TTL_MS = 6 * 3600 * 1000;
-let cached = null;
-let fetchedAt = 0;
-let inFlight = null;
 
-const FALLBACK = {
-  sourceName: 'AA 智能指数排行榜 (Artificial Analysis Intelligence Index)',
-  updatedAt: Date.now(),
-  count: 0,
-  items: [],
-};
-
-export async function fetchLeaderboard(force = false) {
-  const now = Date.now();
-  if (!force && cached && now - fetchedAt < TTL_MS) return cached;
-  if (inFlight) return inFlight;
-  inFlight = (async () => {
-    try {
-      const res = await fetch(API_URL, {
-        method: 'GET',
-        headers: {
-          'user-agent': 'Mozilla/5.0',
-          'accept': 'application/json',
-          'referer': 'https://www.datalearner.com/leaderboards/external/aa-quality-index',
-        },
-        signal: AbortSignal.timeout(15000),
-      });
-      const parsed = JSON.parse(await res.text());
-      const rows = Array.isArray(parsed.data) ? parsed.data : [];
-      const items = rows
+const SOURCES = {
+  aa: {
+    api: 'https://www.datalearner.com/api/leaderboards/external/aa-quality-index',
+    name: 'AA 智能指数排行榜 (Artificial Analysis Intelligence Index)',
+    cacheFile: process.env.TOKSCALE_LB_FILE_AA || path.join(__dirname, 'leaderboard.aa.json'),
+    monthOf(j) { return (j.meta && j.meta.versionTime) || ''; },
+    normalize(j) {
+      const rows = Array.isArray(j.data) ? j.data : [];
+      return rows
         .filter((r) => r && typeof r.modelName === 'string')
         .map((r) => ({
           rank: Number(r.rank) || 0,
@@ -44,42 +23,99 @@ export async function fetchLeaderboard(force = false) {
           modelCode: r.modelCode != null ? String(r.modelCode) : '',
           thinkingMode: r.thinkingMode != null ? String(r.thinkingMode) : '',
         }));
+    },
+  },
+  code: {
+    api: 'https://www.datalearner.com/api/leaderboards/category/code',
+    name: '编程能力排行榜 (SWE-bench 等)',
+    cacheFile: process.env.TOKSCALE_LB_FILE_CODE || path.join(__dirname, 'leaderboard.code.json'),
+    monthOf() { return ''; },
+    normalize(j) {
+      const rows = Array.isArray(j.leaderboardData) ? j.leaderboardData : [];
+      return rows
+        .filter((r) => r && typeof r.MODEL_ABBR_NAME === 'string')
+        .map((r) => ({
+          rank: Number(r.rank) || 0,
+          model: String(r.MODEL_ABBR_NAME),
+          org: String(r.orgName || ''),
+          // 主分取 SWE-bench Verified（0 视为无效分），四舍五入到 1 位小数
+          score: r['SWE-bench Verified'] != null && Number(r['SWE-bench Verified']) > 0 ? Math.round(Number(r['SWE-bench Verified']) * 10) / 10 : null,
+          modelCode: r.MODEL_CODE != null ? String(r.MODEL_CODE) : '',
+          thinkingMode: r.modelMode != null ? String(r.modelMode) : '',
+        }));
+    },
+  },
+};
+
+// 当前活跃榜单源（默认 aa），/stats 的 leaderboard 快照取自该源
+let activeSource = process.env.TOKSCALE_LB_SOURCE || 'aa';
+if (!SOURCES[activeSource]) activeSource = 'aa';
+
+const cache = { aa: null, code: null };
+const fetchedAt = { aa: 0, code: 0 };
+const inFlight = { aa: null, code: null };
+
+export function getActiveSource() { return activeSource; }
+
+export function setActiveSource(s) {
+  if (SOURCES[s]) activeSource = s;
+  return activeSource;
+}
+
+export async function fetchLeaderboard(force = false, source = activeSource) {
+  if (!SOURCES[source]) source = 'aa';
+  const now = Date.now();
+  const st = SOURCES[source];
+  if (!force && cache[source] && now - fetchedAt[source] < TTL_MS) return cache[source];
+  if (inFlight[source]) return inFlight[source];
+  inFlight[source] = (async () => {
+    try {
+      const res = await fetch(st.api, {
+        method: 'GET',
+        headers: {
+          'user-agent': 'Mozilla/5.0',
+          'accept': 'application/json',
+          'referer': 'https://www.datalearner.com/leaderboards',
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      const parsed = JSON.parse(await res.text());
+      const items = st.normalize(parsed);
       if (!items.length) throw new Error('leaderboard empty');
-      const meta = parsed.meta || {};
-      cached = {
-        source: API_URL,
-        sourceName: 'AA 智能指数排行榜 (Artificial Analysis Intelligence Index)',
+      cache[source] = {
+        source: st.api,
+        sourceName: st.name,
         updatedAt: now,
-        month: meta.versionTime || '',
+        month: st.monthOf(parsed),
         count: items.length,
         items,
       };
-      fetchedAt = now;
-      try { writeFileSync(LEADERBOARD_CACHE, JSON.stringify(cached)); } catch {}
-      return cached;
+      fetchedAt[source] = now;
+      try { writeFileSync(st.cacheFile, JSON.stringify(cache[source])); } catch {}
+      return cache[source];
     } catch (err) {
-      const fallback = { ...FALLBACK, stale: true, lastError: String((err && err.message) || err), source: API_URL };
-      if (cached) {
-        cached.stale = true;
-        cached.lastError = String((err && err.message) || err);
-        return cached;
+      const errMsg = String((err && err.message) || err);
+      if (cache[source]) {
+        cache[source].stale = true;
+        cache[source].lastError = errMsg;
+        return cache[source];
       }
-      if (existsSync(LEADERBOARD_CACHE)) {
+      if (existsSync(st.cacheFile)) {
         try {
-          cached = JSON.parse(readFileSync(LEADERBOARD_CACHE, 'utf8'));
-          cached.stale = true;
-          cached.lastError = String((err && err.message) || err);
-          return cached;
+          cache[source] = JSON.parse(readFileSync(st.cacheFile, 'utf8'));
+          cache[source].stale = true;
+          cache[source].lastError = errMsg;
+          return cache[source];
         } catch {}
       }
-      return fallback;
+      return { sourceName: st.name, updatedAt: now, count: 0, items: [], stale: true, lastError: errMsg, source: st.api };
     } finally {
-      inFlight = null;
+      inFlight[source] = null;
     }
   })();
-  return inFlight;
+  return inFlight[source];
 }
 
 export function leaderboardSnapshot() {
-  return cached;
+  return cache[activeSource];
 }
