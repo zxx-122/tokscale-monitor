@@ -98,6 +98,16 @@
 - [x] **推送 GitHub**：`https://github.com/zxx-122/tokscale-monitor`（main 分支）
   - 注：本机 github.com:443 被网络限制、SSH key 未认证 → 改用 GitHub Git Database API 上传本地提交（blob/tree/commit/ref）
   - 2026-08-11 远程 main 已含全部 11 个文件与最新提交 `df22d184`
+- [x] **deepcode 扫描器数据污染**（2026-08-11 修复）
+  - 原实现把 deepcode jsonl 所有 assistant 消息计为 total=0/messages=1 伪记录 → /stats messages 虚增、modelsToday 出现全 0 假模型
+  - deepcode jsonl 实测无 tokens/usage/cost 字段 → parse 改为返回 null，仅保留 toolsStatus 检测
+  - 修复后 /stats 与 /history 的 messages/total/cost 完全一致（实测 142 / 15015516 / 0）
+- [x] **数据核验**（2026-08-11，与 DB 直查对比全部通过）
+  - /stats 今日 token 五字段和 = tokens.total 和；按模型分组与 DB 一致
+  - /history 与 /stats 的 total/cost/messages 一致
+  - /tools 去重后 941 与原始记录一致；byDay 独立复算一致（08-10:647、08-11:152）
+  - 排行榜缓存与 AA API 0 不一致（242 条，versionTime 2026-08-08）
+  - claude/codex 扫描器解析与数据格式匹配（codex info=null 时正确跳过）；kimi 无使用记录正确返回空
 
 ---
 
