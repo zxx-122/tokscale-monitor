@@ -94,15 +94,17 @@
   - 节流：history 60s / tools 30s 拉取一次
 - [x] `LbSource` XAML 默认文本已改为"排行榜 · 加载中"（中立文案，不再出现 OpenCompass 旧名）
 - [x] `widget.log` 启动时截断（`[System.IO.File]::WriteAllText(...,'')`）
-- [ ] **推送 GitHub**（见第三节任务 5）
+- [x] **推送 GitHub**：`https://github.com/zxx-122/tokscale-monitor`（main 分支）
+  - 注：本机 github.com:443 被网络限制、SSH key 未认证 → 改用 GitHub Git Database API 上传本地提交（blob/tree/commit/ref）
+  - 2026-08-11 远程 main 已含全部 11 个文件与最新提交 `df22d184`
 
 ---
 
 ## 三、接下来的具体任务（按优先级）
 
-1. **推送 GitHub**（确认 gh CLI 登录账号，创建仓库 `tokscale-monitor` 或同仓库，push 代码，注意 .gitignore 排除日志与 node_modules）
-2. （可选）widget 主卡直接展示 skill/MCP 简况（目前仅详情视图）
-3. （可选）`/history` 扩展：合并 sources.mjs 各工具扫描的每日数据（当前仅 opencode `message` 表）
+1. （可选）widget 主卡直接展示 skill/MCP 简况（目前仅详情视图）
+2. （可选）`/history` 扩展：合并 sources.mjs 各工具扫描的每日数据（当前仅 opencode `message` 表）
+3. （可选）修复本机 GitHub 443 限制：注册 SSH key 或配置代理后改用 `git push`（当前用 Git Database API 推送可用）
 
 ---
 
