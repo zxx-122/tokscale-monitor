@@ -3,6 +3,8 @@ import http from 'node:http';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { scanAll, toolsStatus, TOOL_LABEL } from './sources.mjs';
+import { fetchLeaderboard, leaderboardSnapshot } from './leaderboard.mjs';
 
 const PORT = Number(process.env.TOKSCALE_MONITOR_PORT) || 8899;
 const ROLLING_MS = 60_000;
@@ -14,7 +16,8 @@ candidates.push(path.join(home, '.local', 'share', 'opencode', 'opencode.db'));
 candidates.push(path.join(home, '.local', 'share', 'opencode', 'opencode-stable.db'));
 if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'opencode', 'opencode.db'));
 
-let dbPath = candidates.find(existsSync) || candidates[0];
+const envDb = process.env.TOKSCALE_MONITOR_DB;
+let dbPath = envDb || candidates.find(existsSync) || candidates[0];
 let db = null;
 
 function getDb() {
@@ -28,19 +31,20 @@ function parseTokens(row) {
   let data = null;
   try { data = JSON.parse(row.data); } catch { return null; }
   const t = data && data.tokens;
-  if (!t) return null;
   const created = data && data.time && data.time.created;
   const completed = data && data.time && data.time.completed;
   const durationMs = (completed && created && completed > created) ? (completed - created) : null;
   return {
-    input: t.input ?? 0,
-    output: t.output ?? 0,
-    reasoning: t.reasoning ?? 0,
-    cacheRead: t.cache && t.cache.read ? t.cache.read : 0,
-    cacheWrite: t.cache && t.cache.write ? t.cache.write : 0,
-    total: t.total ?? 0,
+    hasTokens: !!t,
+    input: t ? (t.input ?? 0) : 0,
+    output: t ? (t.output ?? 0) : 0,
+    reasoning: t ? (t.reasoning ?? 0) : 0,
+    cacheRead: t && t.cache && t.cache.read ? t.cache.read : 0,
+    cacheWrite: t && t.cache && t.cache.write ? t.cache.write : 0,
+    total: t ? (t.total ?? 0) : 0,
     cost: typeof data.cost === 'number' ? data.cost : 0,
-    model: data.modelID || 'unknown',
+    model: data.modelID || null,
+    provider: data.providerID || null,
     durationMs,
   };
 }
@@ -48,10 +52,15 @@ function parseTokens(row) {
 let lastPoll = 0;
 let lastDelta = {};
 let sinceStart = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
+let _lbfetch = null;
+function getLeaderboard() {
+  if (!_lbfetch) _lbfetch = fetchLeaderboard().catch(() => null);
+  return _lbfetch;
+}
 
 function buildStats(now) {
   const conn = getDb();
-  if (!conn) return { ok: false, error: 'db-unavailable', dbPath };
+  if (!conn) return { ok: false, error: 'db-unavailable', dbPath, ts: now };
 
   const dayStart = new Date();
   dayStart.setHours(0, 0, 0, 0);
@@ -64,43 +73,75 @@ function buildStats(now) {
   const byModel = new Map();
   let lastMsg = null;
 
+  const emptyModelBucket = (model, tool, provider) => ({ model, tool, provider, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0, totalDurationMs: 0, timedTokens: 0, samples: 0 });
+  const bumpOpencode = (b, tk, r) => {
+    b.input += tk.input; b.output += tk.output; b.reasoning += tk.reasoning;
+    b.cacheRead += tk.cacheRead; b.cacheWrite += tk.cacheWrite; b.total += tk.total;
+    b.cost += tk.cost; b.messages += tk.hasTokens ? 1 : 0;
+    if (tk.durationMs && tk.durationMs > 0 && tk.total > 0) {
+      b.totalDurationMs += tk.durationMs;
+      b.timedTokens += tk.total;
+      b.samples += 1;
+    }
+    if (!lastMsg || r.time_created > lastMsg.time_created) lastMsg = r;
+  };
+
   for (const r of rows) {
     const tk = parseTokens(r);
     if (!tk) continue;
-    today.input += tk.input;
-    today.output += tk.output;
-    today.reasoning += tk.reasoning;
-    today.cacheRead += tk.cacheRead;
-    today.cacheWrite += tk.cacheWrite;
-    today.total += tk.total;
-    today.cost += tk.cost;
-    today.messages += 1;
-
-    if (r.time_created >= rollCut) {
-      rolling.input += tk.input;
-      rolling.output += tk.output;
-      rolling.reasoning += tk.reasoning;
-      rolling.cacheRead += tk.cacheRead;
-      rolling.cacheWrite += tk.cacheWrite;
-      rolling.total += tk.total;
-      rolling.messages += 1;
-    }
-
-    if (tk.input > 0 || tk.output > 0 || tk.total > 0) {
-      const m = tk.model;
-      if (!byModel.has(m)) byModel.set(m, { model: m, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0, totalDurationMs: 0, timedTokens: 0, samples: 0 });
-      const b = byModel.get(m);
-      b.input += tk.input; b.output += tk.output; b.reasoning += tk.reasoning;
-      b.cacheRead += tk.cacheRead; b.cacheWrite += tk.cacheWrite; b.total += tk.total;
-      b.cost += tk.cost; b.messages += 1;
-      if (tk.durationMs && tk.durationMs > 0 && tk.total > 0) {
-        b.totalDurationMs += tk.durationMs;
-        b.timedTokens += tk.total;
-        b.samples += 1;
+    if (tk.hasTokens) {
+      today.input += tk.input;
+      today.output += tk.output;
+      today.reasoning += tk.reasoning;
+      today.cacheRead += tk.cacheRead;
+      today.cacheWrite += tk.cacheWrite;
+      today.total += tk.total;
+      today.cost += tk.cost;
+      today.messages += 1;
+      if (r.time_created >= rollCut) {
+        rolling.input += tk.input;
+        rolling.output += tk.output;
+        rolling.reasoning += tk.reasoning;
+        rolling.cacheRead += tk.cacheRead;
+        rolling.cacheWrite += tk.cacheWrite;
+        rolling.total += tk.total;
+        rolling.messages += 1;
       }
     }
+    if (tk.model) {
+      const key = 'opencode|' + tk.model;
+      if (!byModel.has(key)) byModel.set(key, emptyModelBucket(tk.model, 'opencode', tk.provider));
+      bumpOpencode(byModel.get(key), tk, r);
+    }
+  }
 
-    if (!lastMsg || r.time_created > lastMsg.time_created) lastMsg = r;
+  let src = { rows: [], freshTotals: null };
+  try { src = scanAll(dayStart.getTime(), now); } catch {}
+  for (const rec of src.rows) {
+    if (rec.tool === 'opencode') continue;
+    today.input += rec.input;
+    today.output += rec.output;
+    today.reasoning += rec.reasoning;
+    today.cacheRead += rec.cacheRead;
+    today.cacheWrite += rec.cacheWrite;
+    today.total += rec.total;
+    today.cost += rec.cost;
+    today.messages += rec.messages;
+    if (rec.ts >= rollCut) {
+      rolling.input += rec.input;
+      rolling.output += rec.output;
+      rolling.reasoning += rec.reasoning;
+      rolling.cacheRead += rec.cacheRead;
+      rolling.cacheWrite += rec.cacheWrite;
+      rolling.total += rec.total;
+      rolling.messages += rec.messages;
+    }
+    const mkey = rec.tool + '|' + rec.model;
+    if (!byModel.has(mkey)) byModel.set(mkey, emptyModelBucket(rec.model, rec.tool, TOOL_LABEL[rec.tool] || rec.tool));
+    const b = byModel.get(mkey);
+    b.input += rec.input; b.output += rec.output; b.reasoning += rec.reasoning;
+    b.cacheRead += rec.cacheRead; b.cacheWrite += rec.cacheWrite; b.total += rec.total;
+    b.cost += rec.cost; b.messages += rec.messages;
   }
 
   const modelsToday = [...byModel.values()].sort((a, b) => b.total - a.total);
@@ -149,36 +190,149 @@ function buildStats(now) {
   }
 
   const delta = {
-    input: Math.max(0, today.input - (lastDelta.input ?? 0)),
-    output: Math.max(0, today.output - (lastDelta.output ?? 0)),
-    reasoning: Math.max(0, today.reasoning - (lastDelta.reasoning ?? 0)),
-    cacheRead: Math.max(0, today.cacheRead - (lastDelta.cacheRead ?? 0)),
-    cacheWrite: Math.max(0, today.cacheWrite - (lastDelta.cacheWrite ?? 0)),
-    total: Math.max(0, today.total - (lastDelta.total ?? 0)),
-    cost: Math.max(0, today.cost - (lastDelta.cost ?? 0)),
-    messages: Math.max(0, today.messages - (lastDelta.messages ?? 0)),
+    input: Math.max(0, today.input - (lastDelta.input ?? 0)) + (src.freshTotals ? src.freshTotals.input : 0),
+    output: Math.max(0, today.output - (lastDelta.output ?? 0)) + (src.freshTotals ? src.freshTotals.output : 0),
+    reasoning: Math.max(0, today.reasoning - (lastDelta.reasoning ?? 0)) + (src.freshTotals ? src.freshTotals.reasoning : 0),
+    cacheRead: Math.max(0, today.cacheRead - (lastDelta.cacheRead ?? 0)) + (src.freshTotals ? src.freshTotals.cacheRead : 0),
+    cacheWrite: Math.max(0, today.cacheWrite - (lastDelta.cacheWrite ?? 0)) + (src.freshTotals ? src.freshTotals.cacheWrite : 0),
+    total: Math.max(0, today.total - (lastDelta.total ?? 0)) + (src.freshTotals ? src.freshTotals.total : 0),
+    cost: Math.max(0, today.cost - (lastDelta.cost ?? 0)) + (src.freshTotals ? src.freshTotals.cost : 0),
+    messages: Math.max(0, today.messages - (lastDelta.messages ?? 0)) + (src.freshTotals ? src.freshTotals.messages : 0),
   };
-  sinceStart.input += delta.input;
-  sinceStart.output += delta.output;
-  sinceStart.reasoning += delta.reasoning;
-  sinceStart.cacheRead += delta.cacheRead;
-  sinceStart.cacheWrite += delta.cacheWrite;
-  sinceStart.total += delta.total;
-  sinceStart.cost += delta.cost;
-  sinceStart.messages += delta.messages;
+  for (const k of Object.keys(sinceStart)) sinceStart[k] += delta[k];
   lastDelta = { input: today.input, output: today.output, reasoning: today.reasoning, cacheRead: today.cacheRead, cacheWrite: today.cacheWrite, total: today.total, cost: today.cost, messages: today.messages };
   lastPoll = now;
 
-  return { ok: true, dbPath, ts: now, today, rolling, delta, sinceStart, active, bestModel, modelsToday };
+  return { ok: true, dbPath, ts: now, today, rolling, delta, sinceStart, active, bestModel, modelsToday, modelCount: modelsToday.length, toolsStatus: toolsStatus(), leaderboard: leaderboardSnapshot() };
 }
 
-const server = http.createServer((req, res) => {
+function buildHistory(now, days) {
+  const conn = getDb();
+  if (!conn) return { ok: false, error: 'db-unavailable', ts: now };
+  const n = Math.max(1, Math.min(90, Number.isFinite(days) ? Math.floor(days) : 30));
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - (n - 1));
+
+  const dayKey = (t) => {
+    const d = new Date(t);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+  const empty = (date) => ({ date, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 });
+
+  const byDay = new Map();
+  for (let i = 0; i < n; i++) {
+    const d = new Date(start.getTime() + i * 86400000);
+    byDay.set(dayKey(d.getTime()), empty(dayKey(d.getTime())));
+  }
+
+  let rows;
+  try {
+    rows = conn.prepare('SELECT time_created, data FROM message WHERE time_created >= ? ORDER BY time_created ASC').all(start.getTime());
+  } catch (err) {
+    return { ok: false, error: 'message-table-unavailable: ' + String((err && err.message) || err), ts: now };
+  }
+  for (const r of rows) {
+    const tk = parseTokens(r);
+    if (!tk || !tk.hasTokens) continue;
+    const b = byDay.get(dayKey(r.time_created));
+    if (!b) continue;
+    b.input += tk.input; b.output += tk.output; b.reasoning += tk.reasoning;
+    b.cacheRead += tk.cacheRead; b.cacheWrite += tk.cacheWrite; b.total += tk.total;
+    b.cost += tk.cost; b.messages += 1;
+  }
+
+  const items = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
+  const totals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
+  for (const d of items) for (const k of Object.keys(totals)) totals[k] += d[k];
+  return { ok: true, ts: now, days: n, start: start.getTime(), source: 'opencode message table', items, totals, dbPath };
+}
+
+function buildToolStats(now) {
+  const conn = getDb();
+  if (!conn) return { ok: false, error: 'db-unavailable', ts: now };
+  const weekStart = now - 7 * 86400000;
+  let rows;
+  try {
+    rows = conn.prepare(
+      "SELECT data, time_created FROM part WHERE json_extract(data,'$.type')='tool' AND time_created >= ? ORDER BY time_created ASC"
+    ).all(weekStart);
+  } catch (err) {
+    return { ok: false, error: 'part-table-unavailable: ' + String((err && err.message) || err), ts: now };
+  }
+
+  const seen = new Set();
+  const skillByName = new Map();
+  const mcpByTool = new Map();
+  const toolByTool = new Map();
+  const byDay = new Map();
+  let totalCalls = 0;
+
+  const dayKey = (t) => {
+    const d = new Date(t);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+
+  for (const r of rows) {
+    let d;
+    try { d = JSON.parse(r.data); } catch { continue; }
+    if (!d || d.type !== 'tool' || !d.tool) continue;
+    const tool = String(d.tool);
+    const callID = d.callID;
+    const key = tool + '|' + callID;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    totalCalls++;
+    const day = dayKey(r.time_created);
+    byDay.set(day, (byDay.get(day) || 0) + 1);
+    toolByTool.set(tool, (toolByTool.get(tool) || 0) + 1);
+    if (tool === 'skill') {
+      const name = (d.state && d.state.input && d.state.input.name) || 'unknown';
+      skillByName.set(name, (skillByName.get(name) || 0) + 1);
+    } else if (/mcp/i.test(tool)) {
+      mcpByTool.set(tool, (mcpByTool.get(tool) || 0) + 1);
+    }
+  }
+
+  const sum = (m) => [...m.values()].reduce((a, b) => a + b, 0);
+  return {
+    ok: true, ts: now, periodDays: 7, weekStart, dbPath,
+    totalCalls,
+    skill: { total: sum(skillByName), byName: [...skillByName.entries()].map(([name, calls]) => ({ name, calls })).sort((a, b) => b.calls - a.calls) },
+    mcp: { detected: mcpByTool.size > 0, total: sum(mcpByTool), byTool: [...mcpByTool.entries()].map(([tool, calls]) => ({ tool, calls })).sort((a, b) => b.calls - a.calls) },
+    byTool: [...toolByTool.entries()].map(([tool, calls]) => ({ tool, calls })).sort((a, b) => b.calls - a.calls),
+    byDay: [...byDay.entries()].map(([date, calls]) => ({ date, calls })).sort((a, b) => a.date.localeCompare(b.date)),
+  };
+}
+
+const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  const stats = buildStats(Date.now());
+  const pathname = req.url.split('?')[0];
+  if (pathname === '/leaderboard') {
+    try {
+      const force = new URLSearchParams((req.url.split('?')[1] || '')).get('refresh') === '1';
+      res.end(JSON.stringify(await fetchLeaderboard(force)));
+    } catch (err) {
+      res.statusCode = 502;
+      res.end(JSON.stringify({ ok: false, error: String((err && err.message) || err) }));
+    }
+    return;
+  }
+  if (pathname === '/tools') {
+    res.end(JSON.stringify(buildToolStats(Date.now())));
+    return;
+  }
+  if (pathname === '/history') {
+    const days = Number(new URLSearchParams((req.url.split('?')[1] || '')).get('days')) || 30;
+    res.end(JSON.stringify(buildHistory(Date.now(), days)));
+    return;
+  }
+  const stats = pathname === '/stats' ? buildStats(Date.now()) : { ok: false, error: 'not-found', ts: Date.now() };
   res.end(JSON.stringify(stats));
 });
 
+getLeaderboard();
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`tokscale-monitor listening on http://127.0.0.1:${PORT}  db=${dbPath}`);
 });

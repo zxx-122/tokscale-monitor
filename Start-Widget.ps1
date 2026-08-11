@@ -14,7 +14,17 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $monitorScript = Join-Path $scriptDir 'monitor.mjs'
 $port = 8899
 $endpoint = "http://127.0.0.1:$port/stats"
+$lbEndpoint = "http://127.0.0.1:$port/leaderboard"
+$toolsEndpoint = "http://127.0.0.1:$port/tools"
+$historyEndpoint = "http://127.0.0.1:$port/history?days=30"
 $script:nodeProc = $null
+
+function Log([string]$m) {
+    try { Add-Content -Path (Join-Path $scriptDir 'widget.log') -Value (('{0:HH:mm:ss.fff} {1}' -f (Get-Date), $m)) -Encoding UTF8 } catch {}
+}
+
+# 启动时截断日志，避免无限累积
+try { [System.IO.File]::WriteAllText((Join-Path $scriptDir 'widget.log'), '') } catch {}
 
 function Format-Token([double]$n) {
     if ($n -lt 0) { $n = 0 }
@@ -22,6 +32,28 @@ function Format-Token([double]$n) {
     if ($n -ge 1e8)  { return ('{0:0.00}亿'   -f ($n / 1e8)) }
     if ($n -ge 1e4)  { return ('{0:0.00}万'   -f ($n / 1e4)) }
     return ('{0:N0}'  -f $n)
+}
+
+function Get-LbShortName($lb) {
+    try {
+        if ($lb -and $lb.sourceName) {
+            if ($lb.sourceName -match 'AA|Artificial Analysis|智能指数') { return 'AA 智能指数' }
+            if ($lb.sourceName -match 'OpenCompass') { return 'OpenCompass' }
+            return $lb.sourceName
+        }
+    } catch {}
+    return '排行榜'
+}
+
+function Format-LbDate($lb) {
+    try {
+        if ($lb -and $lb.month) { return [string]$lb.month }
+        if ($lb -and $lb.updatedAt) {
+            $d = ([DateTimeOffset]::FromUnixTimeMilliseconds([int64]$lb.updatedAt)).LocalDateTime
+            return ('{0:yyyy-MM-dd}' -f $d)
+        }
+    } catch {}
+    return '实时'
 }
 
 function Test-ExistingServer {
@@ -34,7 +66,7 @@ function Test-ExistingServer {
 }
 
 function Start-MonitorBackend {
-    if (Test-ExistingServer) { return }
+    if (Test-ExistingServer) { Log 'backend already running (skip spawn)'; return }
     $nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
     if (-not $nodeExe) {
         foreach ($p in @('C:\Program Files\nodejs\node.exe', 'C:\Program Files (x86)\nodejs\node.exe')) {
@@ -42,12 +74,26 @@ function Start-MonitorBackend {
         }
     }
     if (-not $nodeExe) { throw '未找到 node.exe，请先安装 Node.js（nodejs.org）' }
-    $script:nodeProc = Start-Process -FilePath $nodeExe `
-        -ArgumentList @('--no-warnings', $monitorScript) `
-        -WindowStyle Hidden -PassThru
+    Log "nodeExe=$nodeExe monitorScript=$monitorScript"
+    $errLog = Join-Path $scriptDir 'monitor.err.log'
+    $outLog = Join-Path $scriptDir 'monitor.out.log'
+    try {
+        $script:nodeProc = Start-Process -FilePath $nodeExe `
+            -ArgumentList @('--no-warnings', $monitorScript) `
+            -WindowStyle Hidden -PassThru -RedirectStandardError $errLog -RedirectStandardOutput $outLog
+        Log "node spawned pid=$($script:nodeProc.Id) exited=$($script:nodeProc.HasExited)"
+    } catch {
+        Log "Start-Process threw: $($_.Exception.Message)"
+        throw
+    }
     for ($i = 0; $i -lt 20; $i++) {
-        if (Test-ExistingServer) { break }
+        if (Test-ExistingServer) { Log 'backend up after wait'; break }
+        if ($script:nodeProc.HasExited) { Log "node exited early (code=$($script:nodeProc.ExitCode))"; break }
         Start-Sleep -Milliseconds 300
+    }
+    if (-not (Test-ExistingServer) -and $script:nodeProc.HasExited) {
+        $msg = [string](Get-Content $errLog -Raw -ErrorAction SilentlyContinue)
+        throw "monitor.mjs 启动失败: $msg"
     }
 }
 
@@ -64,7 +110,23 @@ $xaml = @'
         <TextBlock Text="Token 实时监控" FontSize="13" FontWeight="Bold" Foreground="#E8EEFF"/>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
           <Ellipse Name="StatusDot" Width="8" Height="8" Fill="#4CD964" VerticalAlignment="Center" Margin="0,0,6,0"/>
-          <TextBlock Name="StatusText" Text="实时" FontSize="11" Foreground="#9FB3D9"/>
+          <TextBlock Name="StatusText" Text="实时" FontSize="11" Foreground="#9FB3D9" VerticalAlignment="Center"/>
+          <Button Name="CloseBtn" Content="×" Width="20" Height="20" Margin="10,0,0,0" Padding="0" Cursor="Hand"
+                  VerticalAlignment="Center" ToolTip="退出并停止运行">
+            <Button.Style>
+              <Style TargetType="Button">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Foreground" Value="#8A9BC0"/>
+                <Setter Property="FontSize" Value="14"/>
+                <Style.Triggers>
+                  <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="#FF5B6B"/>
+                  </Trigger>
+                </Style.Triggers>
+              </Style>
+            </Button.Style>
+          </Button>
         </StackPanel>
       </DockPanel>
 
@@ -74,11 +136,23 @@ $xaml = @'
 
       <Border Background="#1B2A4A" CornerRadius="8" Padding="10,7,10,7" Margin="0,10,0,0">
         <StackPanel>
-          <TextBlock Name="BestLabel" Text="今日最强模型" FontSize="9" Foreground="#8FE3C6"/>
+          <TextBlock Name="BestLabel" Text="今日最快模型" FontSize="9" Foreground="#8FE3C6"/>
           <TextBlock Name="BestName" Text="—" FontSize="13" FontWeight="Bold" Foreground="#FFF3B0" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
           <TextBlock Name="BestMeta" Text="" FontSize="9.5" Foreground="#A9B9D8" Margin="0,2,0,0"/>
         </StackPanel>
       </Border>
+
+      <DockPanel Margin="0,10,0,0">
+        <TextBlock Text="今日使用模型" FontSize="10" Foreground="#7A8BB0" DockPanel.Dock="Left"/>
+        <TextBlock Name="ModelsCount" Text="" FontSize="10" Foreground="#8FE3C6" TextAlignment="Right" DockPanel.Dock="Right"/>
+      </DockPanel>
+      <TextBlock Name="ModelsList" Text="" FontSize="9.5" Foreground="#C6D3EA" TextWrapping="Wrap" LineHeight="16" Margin="0,2,0,0"/>
+
+      <DockPanel Margin="0,10,0,0">
+        <TextBlock Text="模型能力排行榜" FontSize="10" Foreground="#7A8BB0" DockPanel.Dock="Left"/>
+        <TextBlock Name="LbSource" Text="排行榜 · 加载中" FontSize="9" Foreground="#5B6B8F" TextAlignment="Right" DockPanel.Dock="Right"/>
+      </DockPanel>
+      <TextBlock Name="LbList" Text="" FontSize="9.5" Foreground="#C6D3EA" TextWrapping="Wrap" LineHeight="15" Margin="0,2,0,0"/>
 
       <DockPanel Margin="0,10,0,0">
         <TextBlock Text="最近60秒" FontSize="10.5" Foreground="#7A8BB0" DockPanel.Dock="Left"/>
@@ -97,7 +171,7 @@ $xaml = @'
 '@
 
 $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
-foreach ($n in @('Card','StatusDot','StatusText','TodayTotal','TodayBreakdown','BestLabel','BestName','BestMeta','RollingText','SessionTitle','CostText','DetailBlock','Footer')) {
+foreach ($n in @('Card','StatusDot','StatusText','TodayTotal','TodayBreakdown','BestLabel','BestName','BestMeta','ModelsCount','ModelsList','RollingText','SessionTitle','CostText','DetailBlock','Footer','LbSource','LbList')) {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
@@ -144,6 +218,16 @@ $miCopy = New-Object System.Windows.Controls.MenuItem
 $miCopy.Header = '复制今日摘要'
 $miCopy.Add_Click({ if ($script:lastStats) { $script:lastStats | ConvertTo-Json -Depth 8 | Set-Clipboard } })
 
+$miLbRefresh = New-Object System.Windows.Controls.MenuItem
+$miLbRefresh.Header = '刷新排行榜'
+$miLbRefresh.Add_Click({
+    try {
+        $null = $script:client.GetStringAsync("$lbEndpoint?refresh=1").GetAwaiter().GetResult()
+        Log 'leaderboard refreshed'
+        Refresh-Stats
+    } catch { Log "leaderboard refresh threw: $($_.Exception.Message)" }
+})
+
 $miRestart = New-Object System.Windows.Controls.MenuItem
 $miRestart.Header = '重启监测后端'
 $miRestart.Add_Click({
@@ -159,6 +243,7 @@ $menu.Items.Add($miTopmost) | Out-Null
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $menu.Items.Add($miReport) | Out-Null
 $menu.Items.Add($miCopy) | Out-Null
+$menu.Items.Add($miLbRefresh) | Out-Null
 $menu.Items.Add($miRestart) | Out-Null
 $menu.Items.Add((New-Object System.Windows.Controls.Separator)) | Out-Null
 $menu.Items.Add($miExit) | Out-Null
@@ -193,6 +278,10 @@ $script:client = New-Object System.Net.Http.HttpClient
 $script:client.Timeout = [TimeSpan]::FromSeconds(4)
 $script:busy = $false
 $script:lastStats = $null
+$script:history = $null
+$script:lastHistoryAt = 0
+$script:tools = $null
+$script:lastToolsAt = 0
 
 function Save-DetailReport {
     try {
@@ -217,7 +306,7 @@ function Build-ReportText {
     if ($st.bestModel) {
         $b = $st.bestModel
         $speed = if ($null -ne $b.msPer1K) { ('{0:N1} ms/千token' -f $b.msPer1K) } else { '—' }
-        [void]$sb.AppendLine(('今日最强模型: {0}' -f $b.model))
+        [void]$sb.AppendLine(('今日最快模型: {0}' -f $b.model))
         [void]$sb.AppendLine(('  生成速度 {0} · {1} tokens/秒' -f $speed, $b.tokensPerSec))
         [void]$sb.AppendLine(('  今日用量 {0} (占比 {1:P1})' -f (Format-Token $b.total), $b.share))
     }
@@ -238,6 +327,21 @@ function Refresh-Stats {
         $st = $resp | ConvertFrom-Json
         if (-not $st.ok) { throw 'db-unavailable' }
         $script:lastStats = $st
+
+        # 节流拉取：近30天历史（60s）与 skill/MCP 工具统计（30s），供详情视图使用
+        $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        if ($nowMs - $script:lastHistoryAt -ge 60000) {
+            try {
+                $script:history = $script:client.GetStringAsync($historyEndpoint).GetAwaiter().GetResult() | ConvertFrom-Json
+                $script:lastHistoryAt = $nowMs
+            } catch { Log ("history fetch failed: " + $_.Exception.Message) }
+        }
+        if ($nowMs - $script:lastToolsAt -ge 30000) {
+            try {
+                $script:tools = $script:client.GetStringAsync($toolsEndpoint).GetAwaiter().GetResult() | ConvertFrom-Json
+                $script:lastToolsAt = $nowMs
+            } catch { Log ("tools fetch failed: " + $_.Exception.Message) }
+        }
 
         $StatusDot.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4CD964')
         $StatusText.Text = '实时'
@@ -263,6 +367,50 @@ function Refresh-Stats {
             $BestMeta.Text = '完成一次会话后自动生成'
         }
 
+        $models = @($st.modelsToday)
+        $ModelsCount.Text = ('{0} 个模型' -f $models.Count)
+        if ($models.Count -eq 0) {
+            $ModelsList.Text = '（今日暂无模型使用记录）'
+        } else {
+            $mlines = @()
+            $show = [Math]::Min(6, $models.Count)
+            for ($i = 0; $i -lt $show; $i++) {
+                $m = $models[$i]
+                $star = ''
+                if ($st.bestModel -and $m.model -eq $st.bestModel.model) { $star = '★ ' }
+                $mlines += ('{0}{1}: 输入 {2} · 输出 {3} · 缓存读 {4} | 合计 {5}（{6:P0}） ${7:F4}' -f $star, $m.model, (Format-Token $m.input), (Format-Token $m.output), (Format-Token $m.cacheRead), (Format-Token $m.total), $m.share, $m.cost)
+            }
+            if ($models.Count -gt $show) { $mlines += ('… 还有 {0} 个模型，双击看全部' -f ($models.Count - $show)) }
+            $ModelsList.Text = ($mlines -join "`n")
+        }
+
+        $lb = $st.leaderboard
+        try {
+            if ($lb -and $lb.items -and $lb.items.Count -gt 0) {
+                $srcName = Get-LbShortName $lb
+                $dateTxt = Format-LbDate $lb
+                $LbSource.Text = ('{0} · {1} · {2}名' -f $srcName, $dateTxt, $lb.count)
+                if ($lb.stale) { $LbSource.Text += ' · 缓存' }
+                $lbLines = @()
+                $lbShow = [Math]::Min(5, $lb.items.Count)
+                for ($i = 0; $i -lt $lbShow; $i++) {
+                    $x = $lb.items[$i]
+                    $tm = if ($x.PSObject.Properties['thinkingMode'] -and $x.thinkingMode) { (' ({0})' -f $x.thinkingMode) } else { '' }
+                    $scoreTxt = if ($x.score -ne $null) { $x.score } else { '—' }
+                    $lbLines += ('{0}. {1}{2} · {3}' -f $x.rank, $x.model, $tm, $scoreTxt)
+                }
+                if ($lb.items.Count -gt $lbShow) { $lbLines += ('… 还有 {0} 名，双击详情查看' -f ($lb.items.Count - $lbShow)) }
+                $LbList.Text = ($lbLines -join "`n")
+            } else {
+                $LbSource.Text = (Get-LbShortName $lb)
+                $LbList.Text = '（榜单暂不可用）'
+            }
+        } catch {
+            Log ("leaderboard section FAILED: " + $_.Exception.Message)
+            $LbSource.Text = '排行榜'
+            $LbList.Text = '（榜单暂不可用）'
+        }
+
         $sess = $st.active
         if ($sess) {
             $title = $sess.title
@@ -278,6 +426,9 @@ function Refresh-Stats {
 
         $Footer.Text = ('上次刷新 {0:HH:mm:ss} · 双击切换详情 · 右键菜单' -f (Get-Date))
     } catch {
+        $diag = 'type=' + $_.Exception.GetType().FullName
+        if ($_.InvocationInfo) { $diag += ' line=' + $_.InvocationInfo.ScriptLineNumber + ':' + $_.InvocationInfo.Line.Trim() }
+        Log ("Refresh-Stats FAILED: " + $_.Exception.Message + " | " + $diag)
         $StatusDot.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#FF9500')
         $StatusText.Text = '连接中…'
     } finally {
@@ -296,11 +447,91 @@ function Build-DetailLines($st) {
     }
     $lines += ''
     $lines += ('最近60秒: 输入{0} 输出{1} 缓存读{2}' -f (Format-Token $st.rolling.input), (Format-Token $st.rolling.output), (Format-Token $st.rolling.cacheRead))
+    if ($st.leaderboard -and $st.leaderboard.items -and $st.leaderboard.items.Count -gt 0) {
+        $lines += ''
+        $lines += ('── 模型能力排行榜 ({0}) ──' -f (Get-LbShortName $st.leaderboard))
+        $lb = $st.leaderboard
+        $dateTxt = Format-LbDate $lb
+        $lines += ('更新时间: {0} · 共 {1} 名' -f $dateTxt, $lb.count)
+        foreach ($x in $lb.items) {
+            $tm = if ($x.PSObject.Properties['thinkingMode'] -and $x.thinkingMode) { (' · {0}' -f $x.thinkingMode) } else { '' }
+            $org = if ($x.PSObject.Properties['org'] -and $x.org) { (' · {0}' -f $x.org) } else { '' }
+            $lines += ('{0,2}. {1}{2}{3} · {4}分' -f $x.rank, $x.model, $tm, $org, $x.score)
+        }
+    }
+
+    # 近30天每日消耗
+    if ($script:history -and $script:history.ok) {
+        $lines += ''
+        $lines += ('── 近 {0} 天每日消耗 ──' -f $script:history.days)
+        $hItems = @($script:history.items)
+        if ($hItems.Count -eq 0) {
+            $lines += '（无记录）'
+        } else {
+            $half = [Math]::Ceiling($hItems.Count / 2)
+            for ($i = 0; $i -lt $half; $i++) {
+                $d = $hItems[$i]
+                $left = ('{0} {1}' -f $d.date.Substring(5), (Format-Token $d.total))
+                $j = $i + $half
+                if ($j -lt $hItems.Count) {
+                    $d2 = $hItems[$j]
+                    $pad = ' ' * [Math]::Max(1, (18 - $left.Length))
+                    $lines += ($left + $pad + ('{0} {1}' -f $d2.date.Substring(5), (Format-Token $d2.total)))
+                } else {
+                    $lines += $left
+                }
+            }
+        }
+        if ($script:history.totals) {
+            $ht = $script:history.totals
+            $avg = $ht.total / [Math]::Max(1, $script:history.days)
+            $lines += ('合计 {0} · 日均 {1} · 成本 ${2:F2}' -f (Format-Token $ht.total), (Format-Token $avg), $ht.cost)
+        }
+    }
+
+    # 近7天 skill / MCP 调用
+    if ($script:tools -and $script:tools.ok) {
+        $lines += ''
+        $lines += '── 近7天工具调用 ──'
+        $lines += ('总调用 {0} 次' -f $script:tools.totalCalls)
+        $sk = $script:tools.skill
+        if ($sk -and $sk.total -gt 0) {
+            $lines += ('skill: {0} 次' -f $sk.total)
+            foreach ($s in @($sk.byName | Select-Object -First 5)) {
+                $lines += ('  {0} ×{1}' -f $s.name, $s.calls)
+            }
+        } else {
+            $lines += 'skill: 近7天无调用'
+        }
+        $mc = $script:tools.mcp
+        if ($mc -and $mc.detected) {
+            $lines += ('MCP: {0} 次 ({1} 个工具)' -f $mc.total, $mc.byTool.Count)
+            foreach ($t in @($mc.byTool | Select-Object -First 5)) {
+                $lines += ('  {0} ×{1}' -f $t.tool, $t.calls)
+            }
+        } else {
+            $lines += 'MCP: 未检测到调用'
+        }
+        if ($script:tools.byDay -and $script:tools.byDay.Count -gt 0) {
+            $dayStr = (@($script:tools.byDay | ForEach-Object { ('{0}({1})' -f $_.date.Substring(5), $_.calls) }) -join ' ')
+            $lines += ('每日: {0}' -f $dayStr)
+        }
+    }
     return ($lines -join "`n")
 }
 
 # ---------- launch ----------
-Start-MonitorBackend
+Log 'widget launching'
+try {
+    Start-MonitorBackend
+    Log 'backend started ok'
+} catch {
+    Log "START FAILED: $($_.Exception.ToString())"
+    try { $_.Exception.ToString() | Out-File -FilePath (Join-Path $scriptDir 'widget.err.log') -Encoding UTF8 } catch {}
+    [System.Windows.MessageBox]::Show(('启动监测后端失败：{0}' -f $_), 'Tokscale 悬浮窗', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+    exit 1
+}
+Log 'showing window'
 $window.Add_Closed({
     $script:timer.Stop()
     if ($script:nodeProc -and -not $script:nodeProc.HasExited) {
@@ -309,8 +540,9 @@ $window.Add_Closed({
 })
 $script:dbl.Restart()
 $script:timer.Start()
-Refresh-Stats
+try { Refresh-Stats; Log 'initial refresh ok' } catch { Log "initial refresh threw: $($_.Exception.ToString())" }
 
 $window.Show() | Out-Null
 $window.Activate() | Out-Null
+Log 'dispatcher running'
 [System.Windows.Threading.Dispatcher]::Run()

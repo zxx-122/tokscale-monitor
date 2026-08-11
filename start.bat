@@ -1,13 +1,5 @@
 @echo off
-rem ============================================================
-rem  Tokscale 桌面实时悬浮窗
-rem  数据引擎: 本目录 node.exe monitor.mjs (直读 opencode.db)
-rem  界面:     Start-Widget.ps1 (WPF 置顶悬浮窗)
-rem ============================================================
-if not exist "%~dp0node_modules" (
-  echo [提示] 首次使用请先运行 install.bat 安装依赖
-  pause
-  exit /b 1
-)
-start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%~dp0Start-Widget.ps1"
+rem Tokscale 桌面实时悬浮窗 启动器
+rem 直接调用 powershell（隐藏控制台窗口），避免 start 命令在某些环境下挂起
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0Start-Widget.ps1"
 exit /b 0
