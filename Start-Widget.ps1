@@ -147,6 +147,7 @@ $xaml = @'
         <TextBlock Name="ModelsCount" Text="" FontSize="10" Foreground="#8FE3C6" TextAlignment="Right" DockPanel.Dock="Right"/>
       </DockPanel>
       <TextBlock Name="ModelsList" Text="" FontSize="9.5" Foreground="#C6D3EA" TextWrapping="Wrap" LineHeight="16" Margin="0,2,0,0"/>
+      <TextBlock Name="ToolsSummary" Text="" FontSize="9" Foreground="#7FA8D9" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
 
       <DockPanel Margin="0,10,0,0">
         <TextBlock Text="模型能力排行榜" FontSize="10" Foreground="#7A8BB0" DockPanel.Dock="Left"/>
@@ -171,7 +172,7 @@ $xaml = @'
 '@
 
 $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
-foreach ($n in @('Card','StatusDot','StatusText','TodayTotal','TodayBreakdown','BestLabel','BestName','BestMeta','ModelsCount','ModelsList','RollingText','SessionTitle','CostText','DetailBlock','Footer','LbSource','LbList')) {
+foreach ($n in @('Card','StatusDot','StatusText','TodayTotal','TodayBreakdown','BestLabel','BestName','BestMeta','ModelsCount','ModelsList','ToolsSummary','RollingText','SessionTitle','CostText','DetailBlock','Footer','LbSource','LbList')) {
     Set-Variable -Name $n -Value $window.FindName($n)
 }
 
@@ -341,6 +342,26 @@ function Refresh-Stats {
                 $script:tools = $script:client.GetStringAsync($toolsEndpoint).GetAwaiter().GetResult() | ConvertFrom-Json
                 $script:lastToolsAt = $nowMs
             } catch { Log ("tools fetch failed: " + $_.Exception.Message) }
+        }
+
+        # 主卡：近7天 skill/MCP 简况
+        if ($script:tools -and $script:tools.ok) {
+            $ts = $script:tools
+            $parts = @()
+            $parts += ('工具调用 {0} 次' -f $ts.totalCalls)
+            if ($ts.skill -and $ts.skill.total -gt 0) {
+                $topSk = @($ts.skill.byName | Select-Object -First 1)
+                if ($topSk.Count -gt 0) { $parts += ('skill {0} 次 ({1})' -f $ts.skill.total, $topSk[0].name) }
+                else { $parts += ('skill {0} 次' -f $ts.skill.total) }
+            } else {
+                $parts += 'skill 0 次'
+            }
+            if ($ts.mcp -and $ts.mcp.detected) { $parts += ('MCP {0} 次' -f $ts.mcp.total) }
+            else { $parts += 'MCP 未启用' }
+            $ToolsSummary.Text = ('近7天 ' + ($parts -join ' · '))
+            $ToolsSummary.Visibility = 'Visible'
+        } else {
+            $ToolsSummary.Visibility = 'Collapsed'
         }
 
         $StatusDot.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#4CD964')
