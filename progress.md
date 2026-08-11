@@ -56,9 +56,13 @@
 - `FindName` 绑定列表已包含全部控件（`ModelsCount`/`ModelsList` 等）
 
 ### 4. 排行榜 `leaderboard.mjs`
-- **当前源：AA 智能指数（Artificial Analysis Intelligence Index）**，抓 `https://www.datalearner.com/api/leaderboards/external/aa-quality-index`
-- 字段：`{rank, model, score, org, modelCode, thinkingMode}`，242 个模型，6 小时缓存，失败回退磁盘缓存
-- `Start-Widget.ps1` 显示组织名/思考模式，`Get-LbShortName` 归一化源名显示"AA 智能指数"
+- **双榜单源**（2026-08-11 新增编程榜）：
+  - `aa`（默认）：AA 智能指数，`https://www.datalearner.com/api/leaderboards/external/aa-quality-index`，242 名
+  - `code`：编程能力（SWE-bench 等），`https://www.datalearner.com/api/leaderboards/category/code`，225 名，主分 SWE-bench Verified（0 视为无效，1 位小数）
+- 字段：`{rank, model, score, org, modelCode, thinkingMode}`，6 小时缓存，失败回退磁盘缓存（`leaderboard.aa.json` / `leaderboard.code.json`）
+- `GET /leaderboard?source=aa|code`：切换活跃榜单，`/stats` 的 leaderboard 快照跟随
+- `Start-Widget.ps1`：右键菜单新增"排行榜源"子菜单切换；`Get-LbShortName` 归一化显示"AA 智能指数"/"编程能力"
+- 踩坑：PowerShell 变量名不区分大小写，菜单变量 `$script:lbSource` 与控件 `$LbSource` 同名冲突（控件被覆盖成字符串导致 `.Text` 报错）→ 改名 `$script:lbSrc`
 
 ### 5. 启动器
 - `start.bat`：`powershell -STA -WindowStyle Hidden -File Start-Widget.ps1`
