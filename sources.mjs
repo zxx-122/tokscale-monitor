@@ -206,18 +206,11 @@ sources.kimi = makeScanner({
 sources.deepcode = makeScanner({
   dirs: [path.join(home, '.deepcode', 'projects')],
   fileFilter: (p) => p.endsWith('.jsonl'),
-  parse(line, ctx) {
-    let o;
-    try { o = JSON.parse(line); } catch { return null; }
-    if (!o || o.role !== 'assistant') return null;
-    const ts = Date.parse(o.createTime);
-    if (!ts || !isFinite(ts)) return null;
-    return {
-      ts, tool: 'deepcode',
-      model: ctx.model || 'deepcode',
-      input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0,
-      cost: 0, messages: 1, id: String(o.id || (ts + ':' + line.length)),
-    };
+  parse(line) {
+    // deepcode jsonl（~/.deepcode/projects）只有消息内容，无 tokens/usage/cost 字段
+    // 不产生统计行：全 0 记录会虚增 messages 并污染模型列表（踩坑记录5：不得编造数据）
+    // 保留扫描器仅用于 toolsStatus 数据源检测
+    return null;
   },
 });
 
