@@ -116,12 +116,19 @@
   - /tools 去重后 941 与原始记录一致；byDay 独立复算一致（08-10:647、08-11:152）
   - 排行榜缓存与 AA API 0 不一致（242 条，versionTime 2026-08-08）
   - claude/codex 扫描器解析与数据格式匹配（codex info=null 时正确跳过）；kimi 无使用记录正确返回空
+- [x] **功能测试发现的 4 个 bug**（2026-08-13 修复，测试 49/49 PASS）
+  - `/history` 顶层 total 未累加 claude/codex/kimi（只进 byTool）→ 合并时同步更新顶层字段
+  - `/history?days=0` 被 `|| 30` 吞掉（0 是 falsy）→ 改 null 判断
+  - kimi 未纳入 `/history` → 新增 `scanKimiHistory` 全量扫描（llm response 行 outputTokens）
+  - 增量扫描器文件轮转（size 变小）时 readTail 重置重读 → 重复计数 → 按 rec.id 去重
+  - `delta` 双重计数（today 已含 freshTotals）→ 去掉重复加法
+  - 实测：/stats 与 /history 今日完全一致；无新数据时 delta=0
 
 ---
 
 ## 三、接下来的具体任务（按优先级）
 
-1. （可选）`/history` 扩展：合并 sources.mjs 各工具扫描的每日数据（当前仅 opencode `message` 表；sources 为内存增量扫描，跨进程无法回溯，需持久化存储才可行）
+1. （可选）widget 主卡直接展示 skill/MCP 简况（当前详情视图已展示）
 2. （可选）修复本机 GitHub 443 限制：注册 SSH key 或配置代理后改用 `git push`（当前用 Git Database API 推送可用）
 
 ---
