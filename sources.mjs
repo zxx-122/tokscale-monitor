@@ -253,3 +253,130 @@ export function toolsStatus() {
   }
   return list;
 }
+
+// ---------- 全量历史扫描（按天聚合，供 /history 跨工具统计） ----------
+// 与增量扫描不同：直接读文件全量解析，不受进程重启影响，可回溯任意天数。
+// 数据源限制：claude/codex 记录用量；deepcode/kimi/zcode 的 jsonl/log 无 tokens 字段 → 不产生 token 行。
+
+const dayKey = (t) => {
+  const d = new Date(t);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+
+function emptyDay() {
+  return { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
+}
+
+function initDays(n) {
+  const map = new Map();
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - (n - 1));
+  for (let i = 0; i < n; i++) {
+    const d = new Date(start.getTime() + i * 86400000);
+    map.set(dayKey(d.getTime()), emptyDay());
+  }
+  return map;
+}
+
+function accumulate(b, { input = 0, output = 0, reasoning = 0, cacheRead = 0, cacheWrite = 0, total = 0, cost = 0, messages = 0 }) {
+  b.input += input; b.output += output; b.reasoning += reasoning;
+  b.cacheRead += cacheRead; b.cacheWrite += cacheWrite; b.total += total;
+  b.cost += cost; b.messages += messages;
+}
+
+// claude：逐行取 message.usage（每行独立用量）
+function scanClaudeHistory(n) {
+  const map = initDays(n);
+  const dirs = [path.join(home, '.claude', 'projects')];
+  let found = false;
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const p of walk(dir)) {
+      if (!p.endsWith('.jsonl')) continue;
+      let text;
+      try { text = readFileSync(p, 'utf8'); } catch { continue; }
+      found = true;
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+        const usage = o && o.message && o.message.usage;
+        if (!usage || typeof usage !== 'object') continue;
+        const ts = Date.parse(o.timestamp);
+        if (!ts || !isFinite(ts)) continue;
+        const k = dayKey(ts);
+        if (!map.has(k)) continue;
+        const input = usage.input_tokens || 0;
+        const output = usage.output_tokens || 0;
+        const cacheRead = usage.cache_read_input_tokens || 0;
+        const cacheWrite = usage.cache_creation_input_tokens || 0;
+        accumulate(map.get(k), { input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite, messages: 1 });
+      }
+    }
+  }
+  return { found, map };
+}
+
+// codex：token_count 事件是会话累计值，按文件内时间顺序取差值
+function scanCodexHistory(n) {
+  const map = initDays(n);
+  const dirs = [path.join(home, '.codex', 'sessions')];
+  let found = false;
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const p of walk(dir)) {
+      if (!p.endsWith('.jsonl')) continue;
+      let text;
+      try { text = readFileSync(p, 'utf8'); } catch { continue; }
+      found = true;
+      let prev = null;
+      const g = (u, k) => (u && u[k]) || 0;
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+        const pl = o && o.payload;
+        if (!pl || pl.type !== 'token_count' || !pl.info || !pl.info.total_token_usage) continue;
+        const u = pl.info.total_token_usage;
+        const ts = Date.parse(o.timestamp);
+        if (!ts || !isFinite(ts)) continue;
+        const k = dayKey(ts);
+        if (!map.has(k)) continue;
+        if (prev) {
+          const dIn = Math.max(0, g(u, 'input_tokens') - g(prev, 'input_tokens'));
+          const dCache = Math.max(0, g(u, 'cached_input_tokens') - g(prev, 'cached_input_tokens'));
+          const dOut = Math.max(0, g(u, 'output_tokens') - g(prev, 'output_tokens'));
+          const dReas = Math.max(0, g(u, 'reasoning_output_tokens') - g(prev, 'reasoning_output_tokens'));
+          if (dIn + dOut + dCache + dReas > 0) {
+            accumulate(map.get(k), { input: dIn, output: dOut, reasoning: dReas, cacheRead: dCache, total: dIn + dOut + dCache + dReas, messages: 1 });
+          }
+        }
+        prev = u;
+      }
+    }
+  }
+  return { found, map };
+}
+
+// deepcode/kimi/zcode：jsonl/log 无 tokens 字段，无法提供用量 → 仅报告数据源是否检测到（不编造）
+export function scanHistoryByDay(n) {
+  const days = Math.max(1, Math.min(90, Math.floor(n) || 30));
+  const out = { claude: { found: false, map: initDays(days) }, codex: { found: false, map: initDays(days) } };
+  const cl = scanClaudeHistory(days);
+  const cx = scanCodexHistory(days);
+  out.claude.found = cl.found;
+  out.codex.found = cx.found;
+  out.claude.map = cl.map;
+  out.codex.map = cx.map;
+
+  const tools = {};
+  const known = { claude: '~/.claude/projects', codex: '~/.codex/sessions', kimi: '~/.kimi-code', deepcode: '~/.deepcode', zcode: '~/.zcode | %APPDATA%\\ZCode' };
+  for (const key of Object.keys(sources)) {
+    tools[key] = { found: sources[key].found(), hasUsage: key === 'claude' || key === 'codex' || key === 'opencode', path: known[key] };
+  }
+  // 用全量扫描的实际结果覆盖 claude/codex 的 found（增量扫描器可能尚未初始化）
+  tools.claude.found = cl.found;
+  tools.codex.found = cx.found;
+  return { ok: true, days, byTool: out, tools };
+}

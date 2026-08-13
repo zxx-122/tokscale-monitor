@@ -535,6 +535,45 @@ function Build-DetailLines($st) {
         }
     }
 
+    # 近7天各工具 token 消耗（opencode / claude / codex）
+    if ($script:history -and $script:history.byToolTotals) {
+        $lines += ''
+        $lines += '── 近7天各工具消耗 ──'
+        $toolLabel = @{ opencode = 'opencode'; claude = 'claude code'; codex = 'codex'; deepcode = 'deepcode'; kimi = 'kimi-code' }
+        $toolOrder = @('opencode', 'claude', 'codex', 'kimi', 'deepcode')
+        $anyTool = $false
+        foreach ($tk in $toolOrder) {
+            if (-not $script:history.byToolTotals.PSObject.Properties[$tk]) { continue }
+            $t = $script:history.byToolTotals.$tk
+            $label = $toolLabel[$tk]
+            $hs = $script:history.tools
+            $noUsage = $hs -and $hs.$tk -and -not $hs.$tk.hasUsage
+            if ($t.total -gt 0 -or $t.messages -gt 0) {
+                $anyTool = $true
+                if ($noUsage) {
+                    $lines += ('{0}: {1} 条消息 (无用量数据)' -f $label, $t.messages)
+                } else {
+                    $lines += ('{0}: {1} (输入{2} 输出{3}) · {4}条' -f $label, (Format-Token $t.total), (Format-Token $t.input), (Format-Token $t.output), $t.messages)
+                }
+            } elseif (-not $noUsage) {
+                $lines += ('{0}: 0' -f $label)
+            }
+        }
+        if (-not $anyTool) { $lines += '（近7天各工具均无用量记录）' }
+        # 每日各工具分布（近7天，横向展示）
+        $hItems7 = @($script:history.items)
+        if ($hItems7.Count -gt 0) {
+            $lines += ('每日: ' + (($hItems7 | ForEach-Object {
+                $parts = @()
+                foreach ($tk in @('opencode', 'claude', 'codex')) {
+                    if ($_.byTool.$tk.total -gt 0) { $parts += ('{0} {1}' -f $tk, (Format-Token $_.byTool.$tk.total)) }
+                }
+                if ($parts.Count -eq 0) { return '' }
+                ('{0}[{1}]' -f $_.date.Substring(5), ($parts -join ' '))
+            } | Where-Object { $_ }) -join ' '))
+        }
+    }
+
     # 近7天 skill / MCP 调用
     if ($script:tools -and $script:tools.ok) {
         $lines += ''

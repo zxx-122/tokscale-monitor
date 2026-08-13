@@ -3,7 +3,7 @@ import http from 'node:http';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { scanAll, toolsStatus, TOOL_LABEL } from './sources.mjs';
+import { scanAll, toolsStatus, TOOL_LABEL, scanHistoryByDay } from './sources.mjs';
 import { fetchLeaderboard, leaderboardSnapshot, getActiveSource, setActiveSource } from './leaderboard.mjs';
 
 const PORT = Number(process.env.TOKSCALE_MONITOR_PORT) || 8899;
@@ -218,7 +218,14 @@ function buildHistory(now, days) {
     const d = new Date(t);
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   };
-  const empty = (date) => ({ date, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 });
+  const empty = (date) => ({
+    date, input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0,
+    byTool: {
+      opencode: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
+      claude: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
+      codex: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
+    },
+  });
 
   const byDay = new Map();
   for (let i = 0; i < n; i++) {
@@ -240,12 +247,38 @@ function buildHistory(now, days) {
     b.input += tk.input; b.output += tk.output; b.reasoning += tk.reasoning;
     b.cacheRead += tk.cacheRead; b.cacheWrite += tk.cacheWrite; b.total += tk.total;
     b.cost += tk.cost; b.messages += 1;
+    b.byTool.opencode.input += tk.input; b.byTool.opencode.output += tk.output;
+    b.byTool.opencode.reasoning += tk.reasoning; b.byTool.opencode.cacheRead += tk.cacheRead;
+    b.byTool.opencode.cacheWrite += tk.cacheWrite; b.byTool.opencode.total += tk.total;
+    b.byTool.opencode.cost += tk.cost; b.byTool.opencode.messages += 1;
+  }
+
+  // 合并 claude / codex 全量历史扫描（deepcode 等无用量数据，不产生 token 行）
+  const hist = scanHistoryByDay(n);
+  for (const tool of ['claude', 'codex']) {
+    const hm = hist.byTool[tool].map;
+    for (const [k, day] of hm) {
+      const b = byDay.get(k);
+      if (!b) continue;
+      if (day.total > 0) {
+        b.byTool[tool].input += day.input; b.byTool[tool].output += day.output;
+        b.byTool[tool].reasoning += day.reasoning; b.byTool[tool].cacheRead += day.cacheRead;
+        b.byTool[tool].cacheWrite += day.cacheWrite; b.byTool[tool].total += day.total;
+        b.byTool[tool].cost += day.cost; b.byTool[tool].messages += day.messages;
+      }
+    }
   }
 
   const items = [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date));
   const totals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
   for (const d of items) for (const k of Object.keys(totals)) totals[k] += d[k];
-  return { ok: true, ts: now, days: n, start: start.getTime(), source: 'opencode message table', items, totals, dbPath };
+  const byToolTotals = {};
+  for (const tool of ['opencode', 'claude', 'codex']) {
+    const t = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
+    for (const d of items) for (const k of Object.keys(t)) t[k] += d.byTool[tool][k];
+    byToolTotals[tool] = t;
+  }
+  return { ok: true, ts: now, days: n, start: start.getTime(), source: 'opencode message table + claude/codex 全量扫描', items, totals, byToolTotals, tools: hist.tools, dbPath };
 }
 
 function buildToolStats(now) {

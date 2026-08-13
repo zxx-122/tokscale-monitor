@@ -2,3 +2,5 @@ node_modules/
 *.log
 smoke.out.log
 smoke.err.log
+# 排行榜运行时缓存（leaderboard.mjs 自动生成，网络失败时回退用）
+leaderboard*.json
