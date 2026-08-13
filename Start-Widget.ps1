@@ -565,7 +565,7 @@ function Build-DetailLines($st) {
         if ($hItems7.Count -gt 0) {
             $lines += ('每日: ' + (($hItems7 | ForEach-Object {
                 $parts = @()
-                foreach ($tk in @('opencode', 'claude', 'codex')) {
+                foreach ($tk in @('opencode', 'claude', 'codex', 'kimi')) {
                     if ($_.byTool.$tk.total -gt 0) { $parts += ('{0} {1}' -f $tk, (Format-Token $_.byTool.$tk.total)) }
                 }
                 if ($parts.Count -eq 0) { return '' }

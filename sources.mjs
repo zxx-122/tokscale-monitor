@@ -67,6 +67,10 @@ function makeScanner(opts) {
       let freshTotals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
       state.dayRows = state.dayRows.filter((r) => r.ts >= dayStart);
       if (state.dayRows.length > 30000) state.dayRows = state.dayRows.slice(-20000);
+      // 去重集合：文件轮转（size 变小）时 readTail 会从头重读，需按 id 去重避免重复计数
+      if (!state.seen || state.seen.size > 50000 || !state.seen.size) {
+        state.seen = new Set(state.dayRows.map((r) => r.id));
+      }
       if (now - state.lastWalk > 5000) {
         const seen = new Set();
         const all = [];
@@ -95,6 +99,10 @@ function makeScanner(opts) {
         for (const line of queue) {
           const rec = opts.parse(line, state.ctx, file);
           if (!rec) continue;
+          // 文件轮转重读去重：同 id 记录不重复计数（id 由各 parse 生成，含 ts/内容指纹）
+          const rid = rec.id || (rec.ts + ':' + rec.tool + ':' + rec.total + ':' + rec.messages);
+          if (state.seen.has(rid)) continue;
+          state.seen.add(rid);
           if (rec.ts >= dayStart) {
             state.dayRows.push(rec);
             freshTotals.input += rec.input;
@@ -359,24 +367,64 @@ function scanCodexHistory(n) {
   return { found, map };
 }
 
-// deepcode/kimi/zcode：jsonl/log 无 tokens 字段，无法提供用量 → 仅报告数据源是否检测到（不编造）
+// kimi：日志行格式 `UTC时间 INFO llm response ... outputTokens=N`，按文件内顺序维护 ctx.model
+function scanKimiHistory(n) {
+  const map = initDays(n);
+  const dirs = [path.join(home, '.kimi-code', 'logs'), path.join(home, '.kimi-code', 'sessions')];
+  let found = false;
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
+    for (const p of walk(dir)) {
+      if (!p.endsWith('.log')) continue;
+      let text;
+      try { text = readFileSync(p, 'utf8'); } catch { continue; }
+      found = true;
+      let model = 'kimi-code';
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        const m = line.match(/^([\dTZ:.-]+Z)\s+\S+\s+(llm request|llm response)\s+([^\n]*)/);
+        if (!m) continue;
+        const ts = Date.parse(m[1]);
+        if (!ts || !isFinite(ts)) continue;
+        if (m[2] === 'llm request') {
+          const mm = m[3].match(/model=([^\s]+)/);
+          if (mm) model = mm[1];
+          continue;
+        }
+        const outM = m[3].match(/outputTokens=(\d+)/);
+        if (!outM) continue;
+        const output = Number(outM[1]) || 0;
+        const k = dayKey(ts);
+        if (!map.has(k)) continue;
+        accumulate(map.get(k), { output, total: output, messages: 1 });
+      }
+    }
+  }
+  return { found, map };
+}
+
+// deepcode/zcode：jsonl 无 tokens 字段，无法提供用量 → 仅报告数据源是否检测到（不编造）
 export function scanHistoryByDay(n) {
   const days = Math.max(1, Math.min(90, Math.floor(n) || 30));
-  const out = { claude: { found: false, map: initDays(days) }, codex: { found: false, map: initDays(days) } };
+  const out = { claude: { found: false, map: initDays(days) }, codex: { found: false, map: initDays(days) }, kimi: { found: false, map: initDays(days) } };
   const cl = scanClaudeHistory(days);
   const cx = scanCodexHistory(days);
+  const km = scanKimiHistory(days);
   out.claude.found = cl.found;
   out.codex.found = cx.found;
+  out.kimi.found = km.found;
   out.claude.map = cl.map;
   out.codex.map = cx.map;
+  out.kimi.map = km.map;
 
   const tools = {};
   const known = { claude: '~/.claude/projects', codex: '~/.codex/sessions', kimi: '~/.kimi-code', deepcode: '~/.deepcode', zcode: '~/.zcode | %APPDATA%\\ZCode' };
   for (const key of Object.keys(sources)) {
-    tools[key] = { found: sources[key].found(), hasUsage: key === 'claude' || key === 'codex' || key === 'opencode', path: known[key] };
+    tools[key] = { found: sources[key].found(), hasUsage: key === 'claude' || key === 'codex' || key === 'kimi' || key === 'opencode', path: known[key] };
   }
-  // 用全量扫描的实际结果覆盖 claude/codex 的 found（增量扫描器可能尚未初始化）
+  // 用全量扫描的实际结果覆盖 claude/codex/kimi 的 found（增量扫描器可能尚未初始化）
   tools.claude.found = cl.found;
   tools.codex.found = cx.found;
+  tools.kimi.found = km.found;
   return { ok: true, days, byTool: out, tools };
 }

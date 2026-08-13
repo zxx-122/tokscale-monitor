@@ -189,15 +189,18 @@ function buildStats(now) {
     } catch {}
   }
 
+  // delta = 自上次刷新以来 today 的增量。
+  // 注意：不能再加 src.freshTotals——freshTotals 是本次 scan 新读入的行，
+  // 它们已 push 进 dayRows 并被计入 today，再加会重复计数（首次调用时 delta≈2×今日）。
   const delta = {
-    input: Math.max(0, today.input - (lastDelta.input ?? 0)) + (src.freshTotals ? src.freshTotals.input : 0),
-    output: Math.max(0, today.output - (lastDelta.output ?? 0)) + (src.freshTotals ? src.freshTotals.output : 0),
-    reasoning: Math.max(0, today.reasoning - (lastDelta.reasoning ?? 0)) + (src.freshTotals ? src.freshTotals.reasoning : 0),
-    cacheRead: Math.max(0, today.cacheRead - (lastDelta.cacheRead ?? 0)) + (src.freshTotals ? src.freshTotals.cacheRead : 0),
-    cacheWrite: Math.max(0, today.cacheWrite - (lastDelta.cacheWrite ?? 0)) + (src.freshTotals ? src.freshTotals.cacheWrite : 0),
-    total: Math.max(0, today.total - (lastDelta.total ?? 0)) + (src.freshTotals ? src.freshTotals.total : 0),
-    cost: Math.max(0, today.cost - (lastDelta.cost ?? 0)) + (src.freshTotals ? src.freshTotals.cost : 0),
-    messages: Math.max(0, today.messages - (lastDelta.messages ?? 0)) + (src.freshTotals ? src.freshTotals.messages : 0),
+    input: Math.max(0, today.input - (lastDelta.input ?? 0)),
+    output: Math.max(0, today.output - (lastDelta.output ?? 0)),
+    reasoning: Math.max(0, today.reasoning - (lastDelta.reasoning ?? 0)),
+    cacheRead: Math.max(0, today.cacheRead - (lastDelta.cacheRead ?? 0)),
+    cacheWrite: Math.max(0, today.cacheWrite - (lastDelta.cacheWrite ?? 0)),
+    total: Math.max(0, today.total - (lastDelta.total ?? 0)),
+    cost: Math.max(0, today.cost - (lastDelta.cost ?? 0)),
+    messages: Math.max(0, today.messages - (lastDelta.messages ?? 0)),
   };
   for (const k of Object.keys(sinceStart)) sinceStart[k] += delta[k];
   lastDelta = { input: today.input, output: today.output, reasoning: today.reasoning, cacheRead: today.cacheRead, cacheWrite: today.cacheWrite, total: today.total, cost: today.cost, messages: today.messages };
@@ -224,6 +227,7 @@ function buildHistory(now, days) {
       opencode: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
       claude: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
       codex: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
+      kimi: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 },
     },
   });
 
@@ -253,14 +257,17 @@ function buildHistory(now, days) {
     b.byTool.opencode.cost += tk.cost; b.byTool.opencode.messages += 1;
   }
 
-  // 合并 claude / codex 全量历史扫描（deepcode 等无用量数据，不产生 token 行）
+  // 合并 claude / codex / kimi 全量历史扫描（deepcode 等无用量数据，不产生 token 行）
   const hist = scanHistoryByDay(n);
-  for (const tool of ['claude', 'codex']) {
+  for (const tool of ['claude', 'codex', 'kimi']) {
     const hm = hist.byTool[tool].map;
     for (const [k, day] of hm) {
       const b = byDay.get(k);
       if (!b) continue;
       if (day.total > 0) {
+        b.input += day.input; b.output += day.output; b.reasoning += day.reasoning;
+        b.cacheRead += day.cacheRead; b.cacheWrite += day.cacheWrite; b.total += day.total;
+        b.cost += day.cost; b.messages += day.messages;
         b.byTool[tool].input += day.input; b.byTool[tool].output += day.output;
         b.byTool[tool].reasoning += day.reasoning; b.byTool[tool].cacheRead += day.cacheRead;
         b.byTool[tool].cacheWrite += day.cacheWrite; b.byTool[tool].total += day.total;
@@ -273,12 +280,12 @@ function buildHistory(now, days) {
   const totals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
   for (const d of items) for (const k of Object.keys(totals)) totals[k] += d[k];
   const byToolTotals = {};
-  for (const tool of ['opencode', 'claude', 'codex']) {
+  for (const tool of ['opencode', 'claude', 'codex', 'kimi']) {
     const t = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0, cost: 0, messages: 0 };
     for (const d of items) for (const k of Object.keys(t)) t[k] += d.byTool[tool][k];
     byToolTotals[tool] = t;
   }
-  return { ok: true, ts: now, days: n, start: start.getTime(), source: 'opencode message table + claude/codex 全量扫描', items, totals, byToolTotals, tools: hist.tools, dbPath };
+  return { ok: true, ts: now, days: n, start: start.getTime(), source: 'opencode message table + claude/codex/kimi 全量扫描', items, totals, byToolTotals, tools: hist.tools, dbPath };
 }
 
 function buildToolStats(now) {
@@ -361,7 +368,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   if (pathname === '/history') {
-    const days = Number(new URLSearchParams((req.url.split('?')[1] || '')).get('days')) || 30;
+    // 注意不能用 `|| 30`：days=0 是合法值（会被 buildHistory 夹到 1），而 0 是 falsy 会被吞成 30
+    const daysParam = new URLSearchParams((req.url.split('?')[1] || '')).get('days');
+    const days = daysParam === null ? 30 : Number(daysParam);
     res.end(JSON.stringify(buildHistory(Date.now(), days)));
     return;
   }
