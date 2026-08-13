@@ -27,6 +27,10 @@
 - **`GET /history?days=N`**（新增，默认 30，上限 90）：近 N 天每日 token 汇总
   - 按天聚合 `message` 表 token（input/output/reasoning/cacheRead/cacheWrite/total/cost/messages）
   - `items`：按日期升序，无数据的天保留 0 值占位；`totals`：合计；数据源为 opencode `message` 表
+  - **`byTool` 多工具扩展**（2026-08-13）：每个日期含 opencode/claude/codex 分项，`byToolTotals` 为近 N 天各工具合计，`tools` 含 hasUsage 标记
+    - claude：全量扫描 `~/.claude/projects/*.jsonl` 的 `message.usage` 按天聚合
+    - codex：全量扫描 `~/.codex/sessions` 的 `token_count` 累计值按时间序取差值
+    - deepcode/kimi/zcode：jsonl/log **无 tokens 字段**（实测确认）→ 不产生用量行，不编造
 - **`GET /leaderboard?refresh=1`**：强制刷新排行榜
 - `SIGTERM` 优雅退出
 
